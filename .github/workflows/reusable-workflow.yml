@@ -1,0 +1,30 @@
+# .github/workflows/reusable-workflow.yml
+name: Reusable Build Workflow
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      node-version:
+        required: false
+        type: string
+        default: '18'
+    outputs:
+      build-artifact:
+        description: "The build artifact name"
+        value: ${{ jobs.build.outputs.artifact-name }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: ${{ steps.build.outputs.name }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build
+        id: build
+        run: |
+          echo "Building for ${{ inputs.environment }}"
+          echo "name=my-app-${{ inputs.environment }}" >> $GITHUB_OUTPUT
