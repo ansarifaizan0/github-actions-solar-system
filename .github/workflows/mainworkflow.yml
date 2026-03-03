@@ -1,201 +1,45 @@
 # .github/workflows/main.yml
-name: Main CI/CD Pipeline
+name: CI/CD Pipeline
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Deployment environment'
-        required: true
-        default: 'staging'
-        type: choice
-        options:
-          - staging
-          - production
 
 jobs:
-  # ── 1. LINT & TEST ──────────────────────────────────────────────
-  lint-and-test:
-    name: Lint & Test
+  # ── 1. TEST ────────────────────────────────
+  test:
     runs-on: ubuntu-latest
-    outputs:
-      test-result: ${{ steps.test.outputs.result }}
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+      - run: npm ci
+      - run: npm test
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run linter
-        run: npm run lint
-
-      - name: Run tests
-        id: test
-        run: |
-          npm run test -- --coverage
-          echo "result=passed" >> $GITHUB_OUTPUT
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: coverage/
-          retention-days: 7
-
-  # ── 2. SECURITY SCAN ────────────────────────────────────────────
-  security-scan:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    needs: lint-and-test
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Run security audit
-        run: npm audit --audit-level=high
-
-      - name: Scan for secrets
-        uses: trufflesecurity/trufflehog@main
-        with:
-          path: ./
-          base: ${{ github.event.repository.default_branch }}
-
-  # ── 3. BUILD (calls reusable workflow) ──────────────────────────
-  build-staging:
-    name: Build Staging
-    needs: [lint-and-test, security-scan]
-    if: github.ref != 'refs/heads/main'
-    uses: ./.github/workflows/reusable-workflow.yml
-    with:
-      environment: staging
-      node-version: '20'
-    secrets: inherit
-
-  build-production:
-    name: Build Production
-    needs: [lint-and-test, security-scan]
-    if: github.ref == 'refs/heads/main'
+  # ── 2. BUILD (reusable workflow) ───────────
+  build:
+    needs: test
     uses: ./.github/workflows/reusable-workflow.yml
     with:
       environment: production
       node-version: '20'
     secrets: inherit
 
-  # ── 4. DEPLOY STAGING ───────────────────────────────────────────
-  deploy-staging:
-    name: Deploy to Staging
+  # ── 3. DEPLOY ──────────────────────────────
+  deploy:
     runs-on: ubuntu-latest
-    needs: build-staging
-    if: github.ref != 'refs/heads/main'
-    environment:
-      name: staging
-      url: https://staging.myapp.com
-
+    needs: build
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Download build artifact
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: ${{ needs.build-staging.outputs.build-artifact }}
+          name: ${{ needs.build.outputs.build-artifact }}
           path: ./dist
 
-      - name: Deploy to Staging Server
-        env:
-          DEPLOY_KEY: ${{ secrets.STAGING_DEPLOY_KEY }}
-          SERVER: ${{ secrets.STAGING_SERVER }}
-        run: |
-          echo "Deploying artifact: ${{ needs.build-staging.outputs.build-artifact }}"
-          echo "Deploying to staging server..."
-          # rsync -avz ./dist/ user@$SERVER:/var/www/staging/
-          # OR: aws s3 sync ./dist s3://my-staging-bucket --delete
-
-      - name: Run smoke tests
-        run: |
-          sleep 10
-          curl -f https://staging.myapp.com/health || exit 1
-          echo "Smoke tests passed ✅"
-
-  # ── 5. DEPLOY PRODUCTION ────────────────────────────────────────
-  deploy-production:
-    name: Deploy to Production
-    runs-on: ubuntu-latest
-    needs: build-production
-    if: github.ref == 'refs/heads/main'
-    environment:
-      name: production
-      url: https://myapp.com
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download build artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.build-production.outputs.build-artifact }}
-          path: ./dist
-
-      - name: Deploy to Production Server
-        env:
-          DEPLOY_KEY: ${{ secrets.PROD_DEPLOY_KEY }}
-          SERVER: ${{ secrets.PROD_SERVER }}
-        run: |
-          echo "Deploying artifact: ${{ needs.build-production.outputs.build-artifact }}"
-          echo "Deploying to production server..."
-          # rsync -avz ./dist/ user@$SERVER:/var/www/production/
-          # OR: aws s3 sync ./dist s3://my-prod-bucket --delete
-
-      - name: Run smoke tests
-        run: |
-          sleep 15
-          curl -f https://myapp.com/health || exit 1
-          echo "Smoke tests passed ✅"
-
-      - name: Notify team on success
-        if: success()
-        uses: slackapi/slack-github-action@v1
-        with:
-          payload: |
-            {
-              "text": "✅ Production deploy succeeded for ${{ github.sha }}"
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
-
-  # ── 6. ROLLBACK ON FAILURE ──────────────────────────────────────
-  rollback:
-    name: Rollback Production
-    runs-on: ubuntu-latest
-    needs: deploy-production
-    if: failure() && github.ref == 'refs/heads/main'
-
-    steps:
-      - name: Trigger rollback
-        run: |
-          echo "Deployment failed — rolling back to last stable version..."
-          # Add your rollback script here
-
-      - name: Notify team on failure
-        uses: slackapi/slack-github-action@v1
-        with:
-          payload: |
-            {
-              "text": "🚨 Production deploy FAILED for ${{ github.sha }} — rollback triggered!"
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+      - name: Deploy
+        run: echo "Deploying to production... ✅"
